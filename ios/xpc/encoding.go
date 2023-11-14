@@ -36,11 +36,12 @@ const (
 )
 
 const (
-	alwaysSetFlag        = uint32(0x00000001)
-	dataFlag             = uint32(0x00000100)
-	heartbeatRequestFlag = uint32(0x00010000)
+	AlwaysSetFlag        = uint32(0x00000001)
+	DataFlag             = uint32(0x00000100)
+	HeartbeatRequestFlag = uint32(0x00010000)
 	heartbeatReplyFlag   = uint32(0x00020000)
 	fileOpenFlag         = uint32(0x00100000)
+	InitHandshakeFlag    = uint32(0x00400000)
 )
 
 type wrapperHeader struct {
@@ -53,6 +54,10 @@ type Message struct {
 	Flags uint32
 	Body  map[string]interface{}
 	Id    uint64
+}
+
+func (m Message) String() string {
+	return fmt.Sprintf("ID: %d; Flags: 0x%x; Body: %v", m.Id, m.Flags, m.Body)
 }
 
 func (m Message) IsFileOpen() bool {
@@ -77,6 +82,63 @@ func DecodeMessage(r io.Reader) (Message, error) {
 	return wrapper, err
 }
 
+// EncodeMessage creates a RemoteXPC message encoded with the body and flags provided
+func EncodeMessage(w io.Writer, message Message) error {
+	if message.Body == nil {
+		wrapper := struct {
+			magic uint32
+			h     wrapperHeader
+		}{
+			magic: wrapperMagic,
+			h: wrapperHeader{
+				Flags:   message.Flags,
+				BodyLen: 0,
+				MsgId:   message.Id,
+			},
+		}
+
+		err := binary.Write(w, binary.LittleEndian, wrapper)
+		return err
+	} else {
+		buf := bytes.NewBuffer(nil)
+		err := encodeDictionary(buf, message.Body)
+		if err != nil {
+			return err
+		}
+
+		wrapper := struct {
+			magic uint32
+			h     wrapperHeader
+			body  struct {
+				magic   uint32
+				version uint32
+			}
+		}{
+			magic: wrapperMagic,
+			h: wrapperHeader{
+				Flags:   message.Flags,
+				BodyLen: uint64(buf.Len() + 8),
+				MsgId:   message.Id,
+			},
+			body: struct {
+				magic   uint32
+				version uint32
+			}{
+				magic:   objectMagic,
+				version: bodyVersion,
+			},
+		}
+
+		err = binary.Write(w, binary.LittleEndian, wrapper)
+		if err != nil {
+			return err
+		}
+
+		_, err = io.Copy(w, buf)
+		return err
+	}
+}
+
 // EncodeData creates a RemoteXPC message with the data flag set, if data is present (an empty dictionary is considered
 // to be no data)
 func EncodeData(w io.Writer, body map[string]interface{}) error {
@@ -89,9 +151,9 @@ func EncodeData(w io.Writer, body map[string]interface{}) error {
 		return err
 	}
 
-	flags := alwaysSetFlag
+	flags := AlwaysSetFlag
 	if len(body) > 0 {
-		flags |= dataFlag
+		flags |= DataFlag
 	}
 
 	wrapper := struct {
@@ -380,6 +442,11 @@ func calcPadding(l int) int64 {
 func encodeDictionary(w io.Writer, v map[string]interface{}) error {
 	buf := bytes.NewBuffer(nil)
 
+	err := binary.Write(buf, binary.LittleEndian, uint32(len(v)))
+	if err != nil {
+		return err
+	}
+
 	for k, e := range v {
 		err := encodeDictionaryKey(buf, k)
 		if err != nil {
@@ -391,15 +458,11 @@ func encodeDictionary(w io.Writer, v map[string]interface{}) error {
 		}
 	}
 
-	err := binary.Write(w, binary.LittleEndian, dictionaryType)
+	err = binary.Write(w, binary.LittleEndian, dictionaryType)
 	if err != nil {
 		return err
 	}
 	err = binary.Write(w, binary.LittleEndian, uint32(buf.Len()))
-	if err != nil {
-		return err
-	}
-	err = binary.Write(w, binary.LittleEndian, uint32(len(v)))
 	if err != nil {
 		return err
 	}
@@ -608,7 +671,7 @@ func encodeMessageWithoutBody(w io.Writer) error {
 	}{
 		magic: wrapperMagic,
 		h: wrapperHeader{
-			Flags:   alwaysSetFlag,
+			Flags:   AlwaysSetFlag,
 			BodyLen: 0,
 			MsgId:   0,
 		},
